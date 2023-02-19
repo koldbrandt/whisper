@@ -1,3 +1,9 @@
+# Purpose of this branch 
+
+I want to do batching of transcriptions to bring down inference time. Another person has already done this https://github.com/Blair-Johnson/batch-whisper/tree/main, I do however see some improvements that can be made. I am therefore using some of Blairs code, but Blair were commits behind the main branch. Instead of trying to merge the newer branch ontop of his, I decided to start over. It is however highly inspired by Blairs Works. 
+
+
+
 # Whisper
 
 [[Blog]](https://openai.com/blog/whisper)
