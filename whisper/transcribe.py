@@ -412,7 +412,7 @@ def batch_transcribe(
     )  # time per output token: 0.02 (seconds)
     all_tokens = [[] for _ in range(batch_size)]
     all_segments = [[] for _ in range(batch_size)]
-    prompt_reset_since = 0*batch_size
+    prompt_reset_since = [0]*batch_size
 
 
     initial_prompts = []
