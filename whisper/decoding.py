@@ -617,21 +617,33 @@ class DecodingTask:
 
     @torch.no_grad()
     def run(self, mel: Tensor) -> List[DecodingResult]:
-        self.decoder.reset()
-        tokenizer: Tokenizer = self.tokenizer
+        if type(self.decoder) == list:
+            _ = [decoder.reset() for decoder in self.decoder]
+            tokenizer: List[Tokenizer] = self.tokenizers
+        else:
+            self.decoder.reset()
+            tokenizer: Tokenizer = self.tokenizer
         n_audio: int = mel.shape[0]
-
+        
         audio_features: Tensor = self._get_audio_features(mel)  # encoder forward pass
-        tokens: Tensor = torch.tensor([self.initial_tokens]).repeat(n_audio, 1)
+
+        if type(self.initial_tokens) == list:
+            # if batched, then stack prompts together in batch dimension
+            tokens = [list(token) for token in self.initial_tokens]
+            min_len = min([len(t) for t in tokens])
+            tokens = [t[:min_len] for t in tokens]
+            tokens: Tensor = torch.tensor(tokens)
+        else:
+            tokens: Tensor = torch.tensor([self.initial_tokens]).repeat(n_audio, 1)
 
         # detect language if requested, overwriting the language token
         languages, language_probs = self._detect_language(audio_features, tokens)
+
         if self.options.task == "lang_id":
             return [
                 DecodingResult(audio_features=features, language=language, language_probs=probs)
                 for features, language, probs in zip(audio_features, languages, language_probs)
             ]
-
         # repeat the audio & text tensors by the group size, for beam search or best-of-n sampling
         audio_features = audio_features.repeat_interleave(self.n_group, dim=0)
         tokens = tokens.repeat_interleave(self.n_group, dim=0).to(audio_features.device)
@@ -647,16 +659,36 @@ class DecodingTask:
         tokens = tokens.reshape(n_audio, self.n_group, -1)
         sum_logprobs = sum_logprobs.reshape(n_audio, self.n_group)
 
-        # get the final candidates for each group, and slice between the first sampled token and EOT
-        tokens, sum_logprobs = self.decoder.finalize(tokens, sum_logprobs)
-        tokens: List[List[Tensor]] = [
-            [t[self.sample_begin : (t == tokenizer.eot).nonzero()[0, 0]] for t in s] for s in tokens
-        ]
+        if type(self.decoder) == list:
+            new_tokens = []
+            sum_logprobs_new = []
+            for i in range(len(self.decoder)):
+                # get the final candidates for each group, and slice between the first sampled token and EOT
+                token_slice, sum_logprob_slice = self.decoder[i].finalize(tokens[i].unsqueeze(0), sum_logprobs[i].unsqueeze(0))
+                new_tokens.append(token_slice)
+                sum_logprobs_new.append(sum_logprob_slice[0])
+            tokens = torch.cat(new_tokens, dim=0)
+            sum_logprobs = sum_logprobs_new
+        else:
+            # get the final candidates for each group, and slice between the first sampled token and EOT
+            tokens, sum_logprobs = self.decoder.finalize(tokens, sum_logprobs)
+        
+        if type(self.sample_begin) == list:
+            tokens: List[List[Tensor]] = [
+                [t[self.sample_begin[i] : (t == tokenizer[i].eot).nonzero()[0, 0]] for t in s] for i,s in enumerate(tokens)
+            ]
+        else:
+            tokens: List[List[Tensor]] = [
+                [t[self.sample_begin : (t == tokenizer.eot).nonzero()[0, 0]] for t in s] for s in tokens
+            ]
 
         # select the top-ranked sample in each group
         selected = self.sequence_ranker.rank(tokens, sum_logprobs)
         tokens: List[List[int]] = [t[i].tolist() for i, t in zip(selected, tokens)]
-        texts: List[str] = [tokenizer.decode(t).strip() for t in tokens]
+        if type(tokenizer) == list:
+            texts: List[str] = [tokenizer[i].decode(t).strip() for i,t in enumerate(tokens)]
+        else:
+            texts: List[str] = [tokenizer.decode(t).strip() for t in tokens]
 
         sum_logprobs: List[float] = [lp[i] for i, lp in zip(selected, sum_logprobs)]
         avg_logprobs: List[float] = [lp / (len(t) + 1) for t, lp in zip(tokens, sum_logprobs)]
