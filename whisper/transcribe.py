@@ -532,7 +532,7 @@ def batch_transcribe(
                         tokenizer=tokenizers[languages[imap[i]]]
                     )
 
-                    seekers[imap[i]] += segments[imap[i]].shape[-1]
+                    seekers[imap[i]] += all_segments[imap[i]].shape[-1]
                     all_tokens[imap[i]].extend(batch_tokens[i].tolist())
 
                 if not condition_on_previous_text or results[i].temperature > 0.5:
