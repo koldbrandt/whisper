@@ -72,11 +72,15 @@ def transcribe(
     A dictionary containing the resulting text ("text") and segment-level details ("segments"), and
     the spoken language ("language"), which is detected when `decode_options["language"]` is None.
     """
-    if type(audio) == list:
+    if type(audio) == list and len(audio) > 1:
         return batch_transcribe(model, audio, verbose=verbose, temperature=temperature, 
         compression_ratio_threshold=compression_ratio_threshold, logprob_threshold=logprob_threshold, 
         no_speech_threshold=no_speech_threshold, condition_on_previous_text=condition_on_previous_text, 
         initial_prompt=initial_prompt, **decode_options)
+    
+    if type(audio) == list and len(audio) == 1:
+        audio = audio[0]
+    
     
     dtype = torch.float16 if decode_options.get("fp16", True) else torch.float32
     if model.device == torch.device("cpu"):
