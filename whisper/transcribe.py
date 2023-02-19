@@ -331,7 +331,7 @@ def batch_transcribe(
         decode_options["fp16"] = False
 
     mels = [log_mel_spectrogram(audio_file) for audio_file in audio]
-    segments = [pad_or_trim(mel, N_FRAMES).to(model.device).to(dtype) for mel in mels]
+    # segments = [pad_or_trim(mel, N_FRAMES).to(model.device).to(dtype) for mel in mels]
 
     if decode_options.get("language", None) is None:
         if not model.is_multilingual:
