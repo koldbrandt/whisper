@@ -274,26 +274,25 @@ def batch_transcribe(
     logprob_threshold: Optional[float] = -1.0,
     no_speech_threshold: Optional[float] = 0.6,
     condition_on_previous_text: bool = True,
-    initial_prompt: Optional[str] = None,
     **decode_options,
 ):
     """
-    Transcribe an audio file using Whisper
+    Transcribe multiple audio files in parallel using the batch dimension of the Whisper model
 
     Parameters
     ----------
     model: Whisper
         The Whisper model instance
 
-    audio: Union[str, np.ndarray, torch.Tensor]
-        The path to the audio file to open, or the audio waveform
+    audio: Union[List[str], List[np.ndarray], List[torch.Tensor]]
+        The list of paths to the audio files to open, or the audio waveforms
 
     verbose: bool
         Whether to display the text being decoded to the console. If True, displays all the details,
         If False, displays minimal details. If None, does not display anything
 
     temperature: Union[float, Tuple[float, ...]]
-        Temperature for sampling. It can be a tuple of temperatures, which will be successively used
+        Temperature for sampling. It can be a tuple of temperatures, which will be successfully used
         upon failures according to either `compression_ratio_threshold` or `logprob_threshold`.
 
     compression_ratio_threshold: float
@@ -316,13 +315,10 @@ def batch_transcribe(
 
     Returns
     -------
-    A dictionary containing the resulting text ("text") and segment-level details ("segments"), and
+    A list of dictionaries containing the resulting text ("text") and segment-level details ("segments"), and
     the spoken language ("language"), which is detected when `decode_options["language"]` is None.
     """
-    # We could wrap all of this in a for loop and do a specific batch size for each audio file,
-    # This could be usefull to not use too much memory if we have many audio files
     batch_size = len(audio)
-
     dtype = torch.float16 if decode_options.get("fp16", True) else torch.float32
     if model.device == torch.device("cpu"):
         if torch.cuda.is_available():
@@ -334,10 +330,9 @@ def batch_transcribe(
     if dtype == torch.float32:
         decode_options["fp16"] = False
 
+    mels = [log_mel_spectrogram(audio_file) for audio_file in audio]
+    segments = [pad_or_trim(mel, N_FRAMES).to(model.device).to(dtype) for mel in mels]
 
-    mels = [log_mel_spectrogram(a) for a in audio]
-
-    # reuse language code from Blair's code
     if decode_options.get("language", None) is None:
         if not model.is_multilingual:
             languages = ['en']*len(audio)
@@ -359,14 +354,11 @@ def batch_transcribe(
         else:
             raise NotImplementedError("Only string and list arguments are supported for the language DecodeOption.")
 
-
     task = decode_options.get("task", "transcribe")
-
     tokenizers = {}
     for lang in languages:
         if lang not in tokenizers.keys():
             tokenizers[lang] = get_tokenizer(model.is_multilingual, language=lang, task=task)
-
 
     def decode_with_fallback(segment: torch.Tensor) -> DecodingResult:
         temperatures = [temperature] if isinstance(temperature, (int, float)) else temperature
@@ -409,30 +401,29 @@ def batch_transcribe(
     time_precision = (
         input_stride * HOP_LENGTH / SAMPLE_RATE
     )  # time per output token: 0.02 (seconds)
-    all_tokens = [[] for _ in range(batch_size)]
-    all_segments = [[] for _ in range(batch_size)]
+    all_tokens = [[] for _ in range(batch_size)] 
+    all_segments = [[] for _ in range(batch_size)] 
     prompt_reset_since = [0]*batch_size
 
-
+    initial_prompt = decode_options.pop("initial_prompt", None) or []
     initial_prompts = []
     if initial_prompt:
         assert len(initial_prompt) == batch_size, "Number of initial prompts must match batch size."
         for i in range(batch_size):
             initial_prompts.append(tokenizers[languages[i]].encode(" " + initial_prompt[i].strip()))
             all_tokens.extend(initial_prompt)
-        
 
     def add_segment(
-        *, start: float, end: float, text_tokens: torch.Tensor, result: DecodingResult, tokenizer
+        *, seeker: int, segments: list, start: float, end: float, text_tokens: torch.Tensor, result: DecodingResult, tokenizer
     ):
         text = tokenizer.decode([token for token in text_tokens if token < tokenizer.eot])
         if len(text.strip()) == 0:  # skip empty text output
             return
 
-        all_segments.append(
+        segments.append(
             {
-                "id": len(all_segments),
-                "seek": seek,
+                "id": len(segments),
+                "seek": seeker,
                 "start": start,
                 "end": end,
                 "text": text,
@@ -444,28 +435,25 @@ def batch_transcribe(
             }
         )
         if verbose:
-            print(make_safe(f"[{format_timestamp(start)} --> {format_timestamp(end)}] {text}"))
+            print(f"[{format_timestamp(start)} --> {format_timestamp(end)}] {text}")
 
     # show the progress bar when verbose is False (otherwise the transcribed text will be printed)
     num_frames = [mel.shape[-1] for mel in mels]
-    previous_seek_value = copy.deepcopy(seekers)
+    previous_seek_values = copy.deepcopy(seekers)
 
     def check_cursors(seekers: List[int], num_frames: List[int]) -> bool:
         """Return False when all seekers have exhausted the length of their audio clips."""
         return any([seeker < nf for seeker, nf in list(zip(seekers, num_frames))])
 
-
-    with tqdm.tqdm(total=num_frames, unit='frames', disable=verbose is not False) as pbar:
+    with tqdm.tqdm(total=max(num_frames), unit='frames', disable=verbose is not False) as pbar:
         while check_cursors(seekers, num_frames):
             continue_processing = [seeker < nf for seeker,nf in list(zip(seekers, num_frames))]
             # Only those segments for clips that are not done being processed
             imap = [i for i,v in enumerate(continue_processing) if v]
-
             batch_segments = []
             batch_segment_durations = []
             batch_timestamp_offsets = []
-
-            for i, mel in enumerate(mels):
+            for i,mel in enumerate(mels):
                 if continue_processing[i]:
                     timestamp_offset = float(seekers[i] * HOP_LENGTH / SAMPLE_RATE)
                     batch_timestamp_offsets.append(timestamp_offset)
@@ -473,37 +461,37 @@ def batch_transcribe(
                     segment_duration = segment.shape[-1] * HOP_LENGTH / SAMPLE_RATE
                     batch_segments.append(segment)
                     batch_segment_durations.append(segment_duration)
+                else:
+                    continue
 
             decode_options["prompt"] = [all_tokens[imap[i]][prompt_reset_since[imap[i]]:] for i in range(len(batch_segments))]
             decode_options["language"] = [l for i,l in enumerate(languages) if continue_processing[i]]
-            results: List[DecodingResult] = decode_with_fallback(torch.stack(batch_segments))
+            results: List[DecodingResult] = decode_with_fallback(torch.stack(batch_segments)) 
             batch_tokens = [torch.tensor(result.tokens) for result in results]
-            
+
             no_speech_results = [False]*len(results)
             if no_speech_threshold is not None:
-                for i, result in enumerate(results):
+                for i,result in enumerate(results):
                     # no voice activity check
-                    should_skip = result.no_speech_prob > no_speech_threshold
+                    should_skip = result.no_speech_prob[i] > no_speech_threshold
                     if logprob_threshold is not None and result.avg_logprob > logprob_threshold:
                         # don't skip if the logprob is high enough, despite the no_speech_prob
                         should_skip = False
 
                     if should_skip:
-                        seek += segment.shape[-1]  # fast-forward to the next segment boundary
-                        continue
-            
-
+                        seekers[imap[i]] += segment.shape[-1]  # fast-forward to the next segment boundary
+                        no_speech_results[i] = True
 
             batch_timestamp_tokens: List[torch.Tensor] = [tokens.ge(tokenizers[languages[imap[i]]].timestamp_begin) for i,tokens in enumerate(batch_tokens)]
             batch_consecutive = [torch.where(timestamp_tokens[:-1] & timestamp_tokens[1:])[0].add_(1) for timestamp_tokens in batch_timestamp_tokens]
 
-            for i, consecutive in enumerate(batch_consecutive):
+            for i,consecutive in enumerate(batch_consecutive):
                 if no_speech_results[i]:
                     continue
                 if len(consecutive) > 0:  # if the output contains two consecutive timestamp tokens
                     last_slice = 0
                     for current_slice in consecutive:
-                        sliced_tokens = tokens[last_slice:current_slice]
+                        sliced_tokens = batch_tokens[i][last_slice:current_slice]
                         start_timestamp_position = (
                             sliced_tokens[0].item() - tokenizers[languages[imap[i]]].timestamp_begin
                         )
@@ -514,11 +502,11 @@ def batch_transcribe(
                             seeker=seekers[imap[i]],
                             segments=all_segments[imap[i]],
                             start=batch_timestamp_offsets[i] + start_timestamp_position * time_precision,
-                            end=batch_timestamp_offsets[i] + end_timestamp_position * time_precision,
-                            text_tokens=sliced_tokens[1:-1],
-                            result=results[i],
-                            tokenizer=tokenizers[languages[imap[i]]]
-                        )
+                                end=batch_timestamp_offsets[i] + end_timestamp_position * time_precision,
+                                text_tokens=sliced_tokens[1:-1],
+                                result=results[i],
+                                tokenizer=tokenizers[languages[imap[i]]]
+                            )
                         last_slice = current_slice
                     last_timestamp_position = (
                         batch_tokens[i][last_slice - 1].item() - tokenizers[languages[imap[i]]].timestamp_begin
@@ -528,7 +516,7 @@ def batch_transcribe(
                 else:
                     duration = batch_segment_durations[i]
                     timestamps = batch_tokens[i][batch_timestamp_tokens[i].nonzero().flatten()]
-                    if len(timestamps) > 0 and timestamps[-1].item() != tokenizer.timestamp_begin:
+                    if len(timestamps) > 0 and timestamps[-1].item() != tokenizers[languages[imap[i]]].timestamp_begin:
                         # no consecutive timestamps but it has a timestamp; use the last one.
                         # single timestamp at the end means no speech after the last timestamp.
                         last_timestamp_position = timestamps[-1].item() - tokenizers[languages[imap[i]]].timestamp_begin
@@ -544,7 +532,7 @@ def batch_transcribe(
                         tokenizer=tokenizers[languages[imap[i]]]
                     )
 
-                    seekers[imap[i]] += all_segments[imap[i]].shape[-1]
+                    seekers[imap[i]] += segments[imap[i]].shape[-1]
                     all_tokens[imap[i]].extend(batch_tokens[i].tolist())
 
                 if not condition_on_previous_text or results[i].temperature > 0.5:
