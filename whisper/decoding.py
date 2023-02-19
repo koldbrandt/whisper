@@ -453,53 +453,106 @@ class DecodingTask:
     logit_filters: List[LogitFilter]
 
     def __init__(self, model: "Whisper", options: DecodingOptions):
+        # NOTE: This is the main decoding loop
         self.model = model
 
         language = options.language or "en"
-        tokenizer = get_tokenizer(model.is_multilingual, language=language, task=options.task)
-        self.tokenizer: Tokenizer = tokenizer
+        if type(language) == list:
+            self.tokenizers = [get_tokenizer(model.is_multilingual, language=lang, task=options.task) for lang in language]
+        else:
+            tokenizer = get_tokenizer(model.is_multilingual, language=language, task=options.task)
+            self.tokenizer: Tokenizer = tokenizer
         self.options: DecodingOptions = self._verify_options(options)
 
         self.n_group: int = options.beam_size or options.best_of or 1
         self.n_ctx: int = model.dims.n_text_ctx
         self.sample_len: int = options.sample_len or model.dims.n_text_ctx // 2
 
-        self.sot_sequence: Tuple[int] = tokenizer.sot_sequence
-        if self.options.without_timestamps:
-            self.sot_sequence = tokenizer.sot_sequence_including_notimestamps
-
-        self.initial_tokens: Tuple[int] = self._get_initial_tokens()
-        self.sample_begin: int = len(self.initial_tokens)
-        self.sot_index: int = self.initial_tokens.index(tokenizer.sot)
-
-        # inference: implements the forward pass through the decoder, including kv caching
-        self.inference = PyTorchInference(model, len(self.initial_tokens))
-
-        # sequence ranker: implements how to rank a group of sampled sequences
-        self.sequence_ranker = MaximumLikelihoodRanker(options.length_penalty)
-
-        # decoder: implements how to select the next tokens, given the autoregressive distribution
-        if options.beam_size is not None:
-            self.decoder = BeamSearchDecoder(
-                options.beam_size, tokenizer.eot, self.inference, options.patience
-            )
-        else:
-            self.decoder = GreedyDecoder(options.temperature, tokenizer.eot)
-
-        # logit filters: applies various rules to suppress or penalize certain tokens
         self.logit_filters = []
-        if self.options.suppress_blank:
-            self.logit_filters.append(SuppressBlank(self.tokenizer, self.sample_begin))
-        if self.options.suppress_tokens:
-            self.logit_filters.append(SuppressTokens(self._get_suppress_tokens()))
-        if not options.without_timestamps:
-            precision = CHUNK_LENGTH / model.dims.n_audio_ctx  # usually 0.02 seconds
-            max_initial_timestamp_index = None
-            if options.max_initial_timestamp:
-                max_initial_timestamp_index = round(self.options.max_initial_timestamp / precision)
-            self.logit_filters.append(
-                ApplyTimestampRules(tokenizer, self.sample_begin, max_initial_timestamp_index)
-            )
+        if type(language) == list:
+            self.sot_sequence: List[Tuple[int]] = []
+            for i in range(len(language)):
+                if self.options.without_timestamps:
+                    self.sot_sequence.append(self.tokenizers[i].sot_sequence_including_notimestamps)
+                else:
+                    self.sot_sequence.append(self.tokenizers[i].sot_sequence)
+
+            #self.initial_tokens: Tuple[int] = self._get_initial_tokens()
+            self.initial_tokens = self._get_initial_tokens()
+
+            # branch to handle batched case
+            self.sample_begin: List[int] = [len(tokens) for tokens in self.initial_tokens]
+            self.sot_index: List[int] = [tokens.index(self.tokenizers[i].sot) for i,tokens in enumerate(self.initial_tokens)]
+
+            # inference: implements the forward pass through the decoder, including kv caching
+            self.inference = PyTorchInference(model, max([len(tokens) for tokens in self.initial_tokens]))
+
+            # sequence ranker: implements how to rank a group of sampled sequences
+            self.sequence_ranker = MaximumLikelihoodRanker(options.length_penalty)
+
+            # logit filters: applies various rules to suppress or penalize certain tokens
+            self.decoder = []
+            self.logit_filters = [[]]*len(self.initial_tokens)
+            for i in range(len(self.initial_tokens)):
+                # decoder: implements how to select the next tokens, given the autoregressive distribution
+                if options.beam_size is not None:
+                    self.decoder.append(BeamSearchDecoder(
+                        options.beam_size, self.tokenizers[i].eot, self.inference, options.patience
+                    ))
+                else:
+                    self.decoder.append(GreedyDecoder(options.temperature, self.tokenizers[i].eot))
+
+                if self.options.suppress_blank:
+                    self.logit_filters[i].append(SuppressBlank(self.tokenizers[i], self.sample_begin[i]))
+                if self.options.suppress_tokens:
+                    self.logit_filters[i].append(SuppressTokens(self._get_suppress_tokens(self.tokenizers[i])))
+                if not options.without_timestamps:
+                    precision = CHUNK_LENGTH / model.dims.n_audio_ctx  # usually 0.02 seconds
+                    max_initial_timestamp_index = None
+                    if options.max_initial_timestamp:
+                        max_initial_timestamp_index = round(self.options.max_initial_timestamp / precision)
+                    self.logit_filters[i].append(
+                        ApplyTimestampRules(self.tokenizers[i], self.sample_begin[i], max_initial_timestamp_index)
+                    )
+        else:
+            if self.options.without_timestamps:
+                self.sot_sequence = tokenizer.sot_sequence_including_notimestamps
+            else:
+                self.sot_sequence: Tuple[int] = tokenizer.sot_sequence
+
+            #self.initial_tokens: Tuple[int] = self._get_initial_tokens()
+            self.initial_tokens = self._get_initial_tokens()
+
+            self.sample_begin: int = len(self.initial_tokens)
+            self.sot_index: int = self.initial_tokens.index(tokenizer.sot)
+
+            # inference: implements the forward pass through the decoder, including kv caching
+            self.inference = PyTorchInference(model, len(self.initial_tokens))
+
+            # sequence ranker: implements how to rank a group of sampled sequences
+            self.sequence_ranker = MaximumLikelihoodRanker(options.length_penalty)
+
+            # decoder: implements how to select the next tokens, given the autoregressive distribution
+            if options.beam_size is not None:
+                self.decoder = BeamSearchDecoder(
+                    options.beam_size, tokenizer.eot, self.inference, options.patience
+                )
+            else:
+                self.decoder = GreedyDecoder(options.temperature, tokenizer.eot)
+
+            # logit filters: applies various rules to suppress or penalize certain tokens
+            if self.options.suppress_blank:
+                self.logit_filters.append(SuppressBlank(self.tokenizer, self.sample_begin))
+            if self.options.suppress_tokens:
+                self.logit_filters.append(SuppressTokens(self._get_suppress_tokens(self.tokenizer)))
+            if not options.without_timestamps:
+                precision = CHUNK_LENGTH / model.dims.n_audio_ctx  # usually 0.02 seconds
+                max_initial_timestamp_index = None
+                if options.max_initial_timestamp:
+                    max_initial_timestamp_index = round(self.options.max_initial_timestamp / precision)
+                self.logit_filters.append(
+                    ApplyTimestampRules(tokenizer, self.sample_begin, max_initial_timestamp_index)
+                )
 
     def _verify_options(self, options: DecodingOptions) -> DecodingOptions:
         if options.beam_size is not None and options.best_of is not None:
@@ -516,8 +569,13 @@ class DecodingTask:
 
     def _get_initial_tokens(self) -> Tuple[int]:
         tokens = list(self.sot_sequence)
+        prefix = self.options.prefix
+        prompt = self.options.prompt
+        if (len(prompt) >= 1) and (type(prompt[0]) == list):
+            # branch to batched version if prompt is a list of prompts
+            return self._get_batched_initial_tokens()
 
-        if prefix := self.options.prefix:
+        if prefix:
             prefix_tokens = (
                 self.tokenizer.encode(" " + prefix.strip()) if isinstance(prefix, str) else prefix
             )
@@ -526,7 +584,7 @@ class DecodingTask:
                 prefix_tokens = prefix_tokens[-max_prefix_len:]
             tokens = tokens + prefix_tokens
 
-        if prompt := self.options.prompt:
+        if prompt:
             prompt_tokens = (
                 self.tokenizer.encode(" " + prompt.strip()) if isinstance(prompt, str) else prompt
             )
@@ -534,7 +592,36 @@ class DecodingTask:
 
         return tuple(tokens)
 
-    def _get_suppress_tokens(self) -> Tuple[int]:
+    def _get_batched_initial_tokens(self) -> List[Tuple[int]]:
+        tokens = self.sot_sequence
+        prefixes = self.options.prefix
+        if type(prefixes) != list:
+            prefixes = [prefixes]*len(self.options.prompt)
+        prompts = self.options.prompt
+        min_prompt_len = min([len(prompt) for prompt in prompts])
+
+        #res_tokens = [tokens]*len(prompts)
+        res_tokens = tokens
+        for i,(prefix,prompt) in enumerate(list(zip(prefixes, prompts))):
+            if prefix:
+                prefix_tokens = (
+                    self.tokenizers[i].encode(" " + prefix.strip()) if isinstance(prefix, str) else prefix
+                )
+                if self.sample_len is not None:
+                    max_prefix_len = self.n_ctx // 2 - self.sample_len
+                    prefix_tokens = prefix_tokens[-max_prefix_len:]
+                res_tokens[i] = res_tokens[i] + prefix_tokens
+
+            if prompt:
+                prompt_tokens = (
+                    self.tokenizers[i].encode(" " + prompt.strip()) if isinstance(prompt, str) else prompt
+                )
+                # truncate longer prompts to the length of the shortest prompt
+                prompt_tokens = prompt_tokens[-min_prompt_len:]
+                res_tokens[i] = [self.tokenizers[i].sot_prev] + prompt_tokens[-(self.n_ctx // 2 - 1) :] + list(res_tokens[i])
+        return [tuple(tokens) for tokens in res_tokens]
+
+    def _get_suppress_tokens(self, tokenizer:Tokenizer) -> Tuple[int]:
         suppress_tokens = self.options.suppress_tokens
 
         if isinstance(suppress_tokens, str):
@@ -542,18 +629,18 @@ class DecodingTask:
 
         if -1 in suppress_tokens:
             suppress_tokens = [t for t in suppress_tokens if t >= 0]
-            suppress_tokens.extend(self.tokenizer.non_speech_tokens)
+            suppress_tokens.extend(tokenizer.non_speech_tokens)
         elif suppress_tokens is None or len(suppress_tokens) == 0:
             suppress_tokens = []  # interpret empty string as an empty list
         else:
             assert isinstance(suppress_tokens, list), "suppress_tokens must be a list"
 
         suppress_tokens.extend(
-            [self.tokenizer.sot, self.tokenizer.sot_prev, self.tokenizer.sot_lm]
+            [tokenizer.sot, tokenizer.sot_prev, tokenizer.sot_lm]
         )
-        if self.tokenizer.no_speech is not None:
+        if tokenizer.no_speech is not None:
             # no-speech probability is collected separately
-            suppress_tokens.append(self.tokenizer.no_speech)
+            suppress_tokens.append(tokenizer.no_speech)
 
         return tuple(sorted(set(suppress_tokens)))
 
@@ -580,7 +667,11 @@ class DecodingTask:
             lang_tokens, lang_probs = self.model.detect_language(audio_features, self.tokenizer)
             languages = [max(probs, key=probs.get) for probs in lang_probs]
             if self.options.language is None:
-                tokens[:, self.sot_index + 1] = lang_tokens  # write language tokens
+                if type(self.sot_index) == list:
+                    for i in range(tokens.shape[0]):
+                        tokens[i, self.sot_index[i] + 1] = lang_tokens[i]  # write language tokens
+                else:
+                    tokens[:, self.sot_index + 1] = lang_tokens  # write language tokens
 
         return languages, lang_probs
 
@@ -592,24 +683,55 @@ class DecodingTask:
 
         try:
             for i in range(self.sample_len):
+                # NOTE: **********Here is the model inference****************
                 logits = self.inference.logits(tokens, audio_features)
 
-                if i == 0 and self.tokenizer.no_speech is not None:  # save no_speech_probs
-                    probs_at_sot = logits[:, self.sot_index].float().softmax(dim=-1)
-                    no_speech_probs = probs_at_sot[:, self.tokenizer.no_speech].tolist()
+                if type(self.sot_index) == list:
+                    if i == 0 and not any(isinstance(tok.no_speech, type(None)) for tok in self.tokenizers):  # save no_speech_probs
+                        probs_at_sot = []
+                        no_speech_probs = []
+                        for i in range(len(self.sot_index)):
+                            probs_at_sot.append(logits[:, self.sot_index[i]].float().softmax(dim=-1))
+                            no_speech_probs.append(probs_at_sot[i][:, self.tokenizers[i].no_speech].tolist())
+                else:
+                    if i == 0 and self.tokenizer.no_speech is not None:  # save no_speech_probs
+                        probs_at_sot = logits[:, self.sot_index].float().softmax(dim=-1)
+                        no_speech_probs = probs_at_sot[:, self.tokenizer.no_speech].tolist()
 
                 # now we need to consider the logits at the last token only
                 logits = logits[:, -1]
 
                 # apply the logit filters, e.g. for suppressing or applying penalty to
-                for logit_filter in self.logit_filters:
-                    logit_filter.apply(logits, tokens)
+                if (len(self.logit_filters) > 0) and (type(self.logit_filters[0]) == list):
+                    # for batched case
+                    for i,logit_filter_group in enumerate(self.logit_filters):
+                        for logit_filter in logit_filter_group:
+                            logit_filter.apply(logits[i].unsqueeze(0), tokens[i].unsqueeze(0))
+                elif len(self.logit_filters) > 0:
+                    for logit_filter in self.logit_filters:
+                        logit_filter.apply(logits, tokens)
 
-                # expand the tokens tensor with the selected next tokens
-                tokens, completed = self.decoder.update(tokens, logits, sum_logprobs)
-
-                if completed or tokens.shape[-1] > self.n_ctx:
-                    break
+                if type(self.decoder) == list:
+                    # handle batched case
+                    completed = []
+                    new_tokens = []
+                    for i in range(len(self.decoder)):
+                        # expand the tokens tensor with the selected next tokens
+                        token_slice, comp = self.decoder[i].update(tokens[i].unsqueeze(0), logits[i].unsqueeze(0), sum_logprobs[i].unsqueeze(0))
+                        new_tokens.append(token_slice)
+                        completed.append(comp)
+                    tokens = torch.cat(new_tokens, dim=0)
+                else:
+                    # expand the tokens tensor with the selected next tokens
+                    tokens, completed = self.decoder.update(tokens, logits, sum_logprobs)
+                
+                if type(completed) == list:
+                    completed = all(completed)
+                    if completed or tokens.shape[-1] > self.n_ctx:
+                        break
+                else:
+                    if completed or tokens.shape[-1] > self.n_ctx:
+                        break
         finally:
             self.inference.cleanup_caching()
 
