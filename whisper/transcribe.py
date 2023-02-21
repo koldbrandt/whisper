@@ -318,7 +318,6 @@ def batch_transcribe(
     A list of dictionaries containing the resulting text ("text") and segment-level details ("segments"), and
     the spoken language ("language"), which is detected when `decode_options["language"]` is None.
     """
-
     batch_size = len(audio)
     dtype = torch.float16 if decode_options.get("fp16", True) else torch.float32
     if model.device == torch.device("cpu"):
@@ -331,8 +330,8 @@ def batch_transcribe(
     if dtype == torch.float32:
         decode_options["fp16"] = False
 
-    mels = [log_mel_spectrogram(audio_file) for audio_file in audio]
-    segments = [pad_or_trim(mel, N_FRAMES) for mel in mels]
+    mels = log_mel_spectrogram(audio)
+    segments = [pad_or_trim(mel, N_FRAMES).to(model.device).to(dtype) for mel in mels]
 
     if decode_options.get("language", None) is None:
         if not model.is_multilingual:
@@ -474,7 +473,7 @@ def batch_transcribe(
             if no_speech_threshold is not None:
                 for i,result in enumerate(results):
                     # no voice activity check
-                    should_skip = result.no_speech_prob[i] > no_speech_threshold
+                    should_skip = result.no_speech_prob > no_speech_threshold
                     if logprob_threshold is not None and result.avg_logprob > logprob_threshold:
                         # don't skip if the logprob is high enough, despite the no_speech_prob
                         should_skip = False
