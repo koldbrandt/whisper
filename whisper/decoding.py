@@ -817,9 +817,6 @@ class DecodingTask:
         fields = (texts, languages, tokens, audio_features, avg_logprobs, no_speech_probs)
         if len(set(map(len, fields))) != 1:
             raise RuntimeError(f"inconsistent result lengths: {list(map(len, fields))}")
-        
-        for i, (text, language, tokens, features, avg_logprob, no_speech_prob) in enumerate(zip(*fields)):
-            print(f'{type(i)}, i')
 
         return [
             DecodingResult(
@@ -828,7 +825,7 @@ class DecodingTask:
                 tokens=tokens,
                 text=text,
                 avg_logprob=avg_logprob,
-                no_speech_prob=no_speech_prob[i],
+                no_speech_prob=no_speech_prob,
                 temperature=self.options.temperature,
                 compression_ratio=compression_ratio(text),
             )
