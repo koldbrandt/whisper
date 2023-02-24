@@ -278,41 +278,31 @@ def batch_transcribe(
 ):
     """
     Transcribe multiple audio files in parallel using the batch dimension of the Whisper model
-
     Parameters
     ----------
     model: Whisper
         The Whisper model instance
-
     audio: Union[List[str], List[np.ndarray], List[torch.Tensor]]
         The list of paths to the audio files to open, or the audio waveforms
-
     verbose: bool
         Whether to display the text being decoded to the console. If True, displays all the details,
         If False, displays minimal details. If None, does not display anything
-
     temperature: Union[float, Tuple[float, ...]]
         Temperature for sampling. It can be a tuple of temperatures, which will be successfully used
         upon failures according to either `compression_ratio_threshold` or `logprob_threshold`.
-
     compression_ratio_threshold: float
         If the gzip compression ratio is above this value, treat as failed
-
     logprob_threshold: float
         If the average log probability over sampled tokens is below this value, treat as failed
-
     no_speech_threshold: float
         If the no_speech probability is higher than this value AND the average log probability
         over sampled tokens is below `logprob_threshold`, consider the segment as silent
-
     condition_on_previous_text: bool
         if True, the previous output of the model is provided as a prompt for the next window;
         disabling may make the text inconsistent across windows, but the model becomes less prone to
         getting stuck in a failure loop, such as repetition looping or timestamps going out of sync.
-
     decode_options: dict
         Keyword arguments to construct `DecodingOptions` instances
-
     Returns
     -------
     A list of dictionaries containing the resulting text ("text") and segment-level details ("segments"), and
@@ -330,7 +320,7 @@ def batch_transcribe(
     if dtype == torch.float32:
         decode_options["fp16"] = False
 
-    mels = log_mel_spectrogram(audio)
+    mels = [log_mel_spectrogram(audio_file) for audio_file in audio]
     segments = [pad_or_trim(mel, N_FRAMES).to(model.device).to(dtype) for mel in mels]
 
     if decode_options.get("language", None) is None:
@@ -473,7 +463,7 @@ def batch_transcribe(
             if no_speech_threshold is not None:
                 for i,result in enumerate(results):
                     # no voice activity check
-                    should_skip = result.no_speech_prob > no_speech_threshold
+                    should_skip = result.no_speech_prob[i] > no_speech_threshold
                     if logprob_threshold is not None and result.avg_logprob > logprob_threshold:
                         # don't skip if the logprob is high enough, despite the no_speech_prob
                         should_skip = False
