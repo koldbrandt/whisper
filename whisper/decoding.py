@@ -773,9 +773,14 @@ class DecodingTask:
         tokens, sum_logprobs, no_speech_probs = self._main_loop(audio_features, tokens)
 
         # reshape the tensors to have (n_audio, n_group) as the first two dimensions
-        audio_features = audio_features[:: self.n_group]
-        no_speech_probs = no_speech_probs[:: self.n_group]
-        assert audio_features.shape[0] == len(no_speech_probs) == n_audio
+        if type(self.decoder) == list:
+            audio_features = [audio_feature[:: self.n_group] for audio_feature in audio_features]
+            no_speech_probs = [no_speech_prob[:: self.n_group] for no_speech_prob in no_speech_probs]
+            assert all(audio_feature.shape[0] == len(no_speech_prob) == n_audio for audio_feature, no_speech_prob in zip(audio_features, no_speech_probs))
+        else:
+            audio_features = audio_features[:: self.n_group]
+            no_speech_probs = no_speech_probs[:: self.n_group]
+            assert audio_features.shape[0] == len(no_speech_probs) == n_audio
 
         tokens = tokens.reshape(n_audio, self.n_group, -1)
         sum_logprobs = sum_logprobs.reshape(n_audio, self.n_group)
