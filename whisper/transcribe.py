@@ -240,6 +240,7 @@ def transcribe(
                 )
 
             seek += segment.shape[-1]
+            print(seek)
             all_tokens.extend(tokens.tolist())
 
             if not condition_on_previous_text or result.temperature > 0.5:
