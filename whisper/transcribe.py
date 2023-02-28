@@ -216,7 +216,7 @@ def transcribe(
                 last_timestamp_position = (
                     tokens[last_slice - 1].item() - tokenizer.timestamp_begin
                 )
-                print(timestamp_offset + end_timestamp_position * time_precision, timestamp_offset + segment_duration, tokens[last_slice:], result)
+                print(timestamp_offset + end_timestamp_position * time_precision, timestamp_offset + segment_duration, tokens[last_slice:])
                 add_segment(
                     start=timestamp_offset + end_timestamp_position * time_precision,
                     end=timestamp_offset + segment_duration,
