@@ -216,7 +216,7 @@ def transcribe(
                 last_timestamp_position = (
                     tokens[last_slice - 1].item() - tokenizer.timestamp_begin
                 )
-                
+                print(timestamp_offset + end_timestamp_position * time_precision, timestamp_offset + segment_duration)
                 add_segment(
                     start=timestamp_offset + end_timestamp_position * time_precision,
                     end=timestamp_offset + segment_duration,
@@ -240,7 +240,6 @@ def transcribe(
                 )
 
             seek += segment.shape[-1]
-            print(seek)
             all_tokens.extend(tokens.tolist())
 
             if not condition_on_previous_text or result.temperature > 0.5:
