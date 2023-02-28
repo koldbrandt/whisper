@@ -1,9 +1,3 @@
-# Purpose of this branch 
-
-I want to do batching of transcriptions to bring down inference time. Another person has already done this https://github.com/Blair-Johnson/batch-whisper/tree/main, I do however see some improvements that can be made. I am therefore using some of Blairs code, but Blair were commits behind the main branch. Instead of trying to merge the newer branch ontop of his, I decided to start over. It is however highly inspired by Blairs Works. 
-
-
-
 # Whisper
 
 [[Blog]](https://openai.com/blog/whisper)
@@ -29,11 +23,11 @@ We used Python 3.9.9 and [PyTorch](https://pytorch.org/) 1.10.1 to train and tes
 
 Alternatively, the following command will pull and install the latest commit from this repository, along with its Python dependencies:
 
-    pip install git+https://github.com/koldbrandt/whisper.git 
+    pip install git+https://github.com/openai/whisper.git 
 
 To update the package to the latest version of this repository, please run:
 
-    pip install --upgrade --no-deps --force-reinstall git+https://github.com/koldbrandt/whisper.git
+    pip install --upgrade --no-deps --force-reinstall git+https://github.com/openai/whisper.git
 
 It also requires the command-line tool [`ffmpeg`](https://ffmpeg.org/) to be installed on your system, which is available from most package managers:
 

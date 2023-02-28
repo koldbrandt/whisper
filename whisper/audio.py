@@ -1,8 +1,7 @@
 import os
 from functools import lru_cache
-from typing import Union, List
+from typing import Union
 
-import multiprocessing as mp
 import ffmpeg
 import numpy as np
 import torch
@@ -70,6 +69,7 @@ def pad_or_trim(array, length: int = N_SAMPLES, *, axis: int = -1):
             pad_widths = [(0, 0)] * array.ndim
             pad_widths[axis] = (0, length - array.shape[axis])
             array = np.pad(array, pad_widths)
+
     return array
 
 
@@ -88,15 +88,8 @@ def mel_filters(device, n_mels: int = N_MELS) -> torch.Tensor:
     with np.load(os.path.join(os.path.dirname(__file__), "assets", "mel_filters.npz")) as f:
         return torch.from_numpy(f[f"mel_{n_mels}"]).to(device)
 
-def audio_load_helper(audio):
-    if not torch.is_tensor(audio):
-        if isinstance(audio, str):
-            audio = load_audio(audio)
-        audio = torch.from_numpy(audio)
-    return audio
-    
 
-def log_mel_spectrogram(audio: Union[str, np.ndarray, torch.Tensor, List[str], List[np.ndarray], List[torch.Tensor]], n_mels: int = N_MELS):
+def log_mel_spectrogram(audio: Union[str, np.ndarray, torch.Tensor], n_mels: int = N_MELS):
     """
     Compute the log-Mel spectrogram of
 
@@ -113,19 +106,14 @@ def log_mel_spectrogram(audio: Union[str, np.ndarray, torch.Tensor, List[str], L
     torch.Tensor, shape = (80, n_frames)
         A Tensor that contains the Mel spectrogram
     """
-    if type(audio) == list:
-        with mp.Pool() as p:
-            audio_files = p.map(audio_load_helper, audio)
-        return [log_mel_spectrogram(audio_file, n_mels) for audio_file in audio_files]
-    else:
-        if not torch.is_tensor(audio):
-            if isinstance(audio, str):
-                audio = load_audio(audio)
-            audio = torch.from_numpy(audio)
+    if not torch.is_tensor(audio):
+        if isinstance(audio, str):
+            audio = load_audio(audio)
+        audio = torch.from_numpy(audio)
 
     window = torch.hann_window(N_FFT).to(audio.device)
     stft = torch.stft(audio, N_FFT, HOP_LENGTH, window=window, return_complex=True)
-    magnitudes = stft[:, :-1].abs() ** 2
+    magnitudes = stft[..., :-1].abs() ** 2
 
     filters = mel_filters(audio.device, n_mels)
     mel_spec = filters @ magnitudes
